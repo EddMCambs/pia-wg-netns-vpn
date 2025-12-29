@@ -362,7 +362,7 @@ nameserver $PIA_DNS_SERVER_2
 #    geoiplookup "$VPN_IP"
 #    whois -h whois.cymru.com " -v $VPN_IP"
     # If we're not portforwarding, we're done.
-    if [[ "${PIA_PF}" != "true" ]];
+    if [[ "${PIA_PF}" != "true" ]]; then
       return 0
     fi
 
