@@ -414,13 +414,12 @@ EOF
         # echo the port so we can so stuff with it
         echo "Port bound successfully. The port is ${PIA_PORT}"
         # Start a background task that runs every 900 seconds
-        nohup ip netns exec "$NS_NAME" bash -c "while true; do sleep 900; PIA_BIND_PORT_RESPONSE=\"$(curl -Gs -m 5 \
+        nohup ip netns exec "$NS_NAME" bash -c "while true; do sleep 900; if [[ $(curl -Gs -m 5 \
             --connect-to "$PIA_WG_SERVER_HOSTNAME::$PIA_WG_SERVER_IP:" \
             --cacert "$PIA_CERT_FILE" \
             --data-urlencode "payload=${PIA_PAYLOAD}" \
             --data-urlencode "signature=${PIA_SIGNATURE}" \
-            "https://${PIA_WG_SERVER_HOSTNAME}:19999/bindPort")\";
-            if [[ $(echo "$PIA_BIND_PORT_RESPONSE" | jq -r '.status') != 'OK' ]]; then
+            "https://${PIA_WG_SERVER_HOSTNAME}:19999/bindPort" | jq -r '.status') != 'OK' ]]; then
                 echo -e 'The API did not return OK when trying to bind port... Exiting.'
                 exit 1
             fi
