@@ -363,7 +363,7 @@ nameserver $PIA_DNS_SERVER_2
 #    whois -h whois.cymru.com " -v $VPN_IP"
     # If we're not portforwarding, we're done.
     if [[ "${PIA_PF}" != "true" ]];
-      return
+      return 0
     fi
 
     # Otherwise we need to start the port forward up. First, we need a payload+sig
