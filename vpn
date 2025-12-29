@@ -371,7 +371,7 @@ nameserver $PIA_DNS_SERVER_2
     # Otherwise we need to start the port forward up. First, we need a payload+sig. Check if we've got one cached for this vpn name
     readonly PIA_PS_CACHE="$VPN_ROOT_DIR/secret/${NS_NAME}_PS"
     local NEW_PORT=true
-    if [[ -f "$VPIA_PS_CACHE" ]]; then
+    if [[ -f "$PIA_PS_CACHE" ]]; then
         source $PIA_PS_CACHE
         if [[ ${PIA_PF_EXPIRY:0} < $(date +%s) ]]; then
             echo "Existing payload expired, getting new one"
