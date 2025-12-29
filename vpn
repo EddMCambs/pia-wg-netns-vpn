@@ -414,7 +414,7 @@ EOF
         # echo the port so we can so stuff with it
         echo "Port bound successfully. The port is ${PIA_PORT}"
         # Start a background task that runs every 900 seconds
-        nohup bash -c "while true; do sleep 900; PIA_BIND_PORT_RESPONSE=\"$(ip netns exec "$NS_NAME" curl -Gs -m 5 \
+        nohup ip netns exec "$NS_NAME" bash -c "while true; do sleep 900; PIA_BIND_PORT_RESPONSE=\"$(curl -Gs -m 5 \
             --connect-to "$PIA_WG_SERVER_HOSTNAME::$PIA_WG_SERVER_IP:" \
             --cacert "$PIA_CERT_FILE" \
             --data-urlencode "payload=${PIA_PAYLOAD}" \
