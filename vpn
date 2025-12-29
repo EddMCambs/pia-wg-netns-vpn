@@ -32,6 +32,7 @@ readonly PIA_TOKEN_CACHE_SECONDS=$((60*60*24))         # 24 hours
 PIA_SERVERS_JSON=""
 PIA_TOKEN=""
 PIA_WG_SERVER_INFO_JSON=""
+PIA_WG_SERVER_HOSTNAME=""
 
 readonly PIA_SERVERS_JSON_WG_SELECTOR=".regions[] | select(.offline == false) | select(.servers.wg) | "
 readonly PIA_SERVERS_LIST_CACHE="$VPN_ROOT_DIR/public/pia_servers_v6.json"
@@ -118,13 +119,19 @@ get_pia_token() {
 get_pia_wg_server_info_json() {
     local PIA_REGION_ID="$1"
     local WG_PUB_KEY="$2"
-
+    local PIA_PF="$3"
+    local ERRSTR=""
     local PIA_WG_SERVER_JSON
-    PIA_WG_SERVER_JSON="$(echo "$PIA_SERVERS_JSON" | jq -r "$PIA_SERVERS_JSON_WG_SELECTOR""select(.id == \"$PIA_REGION_ID\")")"
+    if [[ "${PIA_PF}" == "true" ]]; then
+        local ERRSTR=" or no servers with port forward enabled in region"
+        PIA_WG_SERVER_JSON="$(echo "$PIA_SERVERS_JSON" | jq -r "$PIA_SERVERS_JSON_WG_SELECTOR""select((.id == \"$PIA_REGION_ID\")) and (.port_forward == true)")"
+    else
+        PIA_WG_SERVER_JSON="$(echo "$PIA_SERVERS_JSON" | jq -r "$PIA_SERVERS_JSON_WG_SELECTOR""select(.id == \"$PIA_REGION_ID\")")"
+    fi
 
     if [[ -z "$PIA_WG_SERVER_JSON" ]]
     then
-        echo "Error: No such PIA region id \"$PIA_REGION_ID\""
+        echo "Error: No such PIA region id \"$PIA_REGION_ID\"${ERRSTR}"
         exit 1
     fi
 
@@ -132,7 +139,7 @@ get_pia_wg_server_info_json() {
     # (not a secure random function and % makes it not an uniform distribution,
     # but for our purposes it's good enough)
     local RNG="$RANDOM"
-    local PIA_WG_SERVER_HOSTNAME PIA_WG_SERVER_IP
+    local PIA_WG_SERVER_IP
     PIA_WG_SERVER_HOSTNAME="$(echo "$PIA_WG_SERVER_JSON" | jq --argjson rng "$RNG" -r '.servers.wg | .[$rng % length].cn')"
     PIA_WG_SERVER_IP="$(echo "$PIA_WG_SERVER_JSON" | jq --argjson rng "$RNG" -r '.servers.wg | .[$rng % length].ip')"
 
@@ -254,6 +261,11 @@ up() {
         exit 1
     fi
 
+    if [[ "${3:-}" == "pf" ]]; then
+        local PIA_PF=true
+    else
+        local PIA_PF=false
+    fi  
     local NS_NAME="$1"
     local WG_NAME="$NS_NAME"
     local PIA_REGION_ID="$2"
@@ -290,7 +302,7 @@ up() {
     get_pia_servers_json
 
     echo "Getting WireGuard information for a random server in \"$PIA_REGION_ID\" region..."
-    get_pia_wg_server_info_json "$PIA_REGION_ID" "$WG_PUB_KEY"
+    get_pia_wg_server_info_json "$PIA_REGION_ID" "$WG_PUB_KEY" "$PIA_PF"
 
     local PIA_WG_PEER_IP PIA_WG_SERVER_IP PIA_WG_SERVER_PORT PIA_WG_SERVER_KEY PIA_DNS_SERVER_1 PIA_DNS_SERVER_2
     PIA_WG_PEER_IP="$(echo "$PIA_WG_SERVER_INFO_JSON" | jq -r '.peer_ip')"
@@ -349,6 +361,48 @@ nameserver $PIA_DNS_SERVER_2
 #    echo "IP: $VPN_IP"
 #    geoiplookup "$VPN_IP"
 #    whois -h whois.cymru.com " -v $VPN_IP"
+    # If we're not portforwarding, we're done.
+    if [[ "${PIA_PF}" != "true" ]];
+      return
+    fi
+
+    # Otherwise we need to start the port forward up. First, we need a payload+sig
+    PIA_PAYLOAD_AND_SIGNATURE="$(ip netns exec "$NS_NAME" curl -s -m 5 \
+      --connect-to "$PIA_WG_SERVER_HOSTNAME::$PIA_WG_SERVER_IP:" \
+      --cacert "$PIA_CERT_FILE" \
+      -G --data-urlencode "token=${PIA_TOKEN}" \
+      "https://${PIA_WG_SERVER_HOSTNAME}:19999/getSignature")"
+    if [[ $(echo "$PIA_PAYLOAD_AND_SIGNATURE" | jq -r '.status') != "OK" ]]; then
+        echo -e "The payload_and_signature variable does not contain an OK status."    
+        exit 1
+    fi
+    PIA_SIGNATURE=$(echo "$PIA_PAYLOAD_AND_SIGNATURE" | jq -r '.signature')
+    PIA_PAYLOAD=$(echo "$PIA_PAYLOAD_AND_SIGNATURE" | jq -r '.payload')
+    PIA_PORT=$(echo "$PIA_PAYLOAD" | base64 -d | jq -r '.port')
+    # Now we need to bind the port:
+    PIA_BIND_PORT_RESPONSE="$(ip netns exec "$NS_NAME" curl -Gs -m 5 \
+    --connect-to "$PIA_WG_SERVER_HOSTNAME::$PIA_WG_SERVER_IP:" \
+    --cacert "$PIA_CERT_FILE" \
+    --data-urlencode "payload=${PIA_PAYLOAD}" \
+    --data-urlencode "signature=${PIA_SIGNATURE}" \
+    "https://${PIA_WG_SERVER_HOSTNAME}:19999/bindPort")"
+    if [[ $(echo "$PIA_BIND_PORT_RESPONSE" | jq -r '.status') != "OK" ]]; then
+        echo -e "The API did not return OK when trying to bind port... Exiting."
+        exit 1
+    else
+        # Start a background task that runs every 900 seconds
+        nohup bash -c "while true; do sleep 900; PIA_BIND_PORT_RESPONSE=\"$(ip netns exec "$NS_NAME" curl -Gs -m 5 \
+            --connect-to "$PIA_WG_SERVER_HOSTNAME::$PIA_WG_SERVER_IP:" \
+            --cacert "$PIA_CERT_FILE" \
+            --data-urlencode "payload=${PIA_PAYLOAD}" \
+            --data-urlencode "signature=${PIA_SIGNATURE}" \
+            "https://${PIA_WG_SERVER_HOSTNAME}:19999/bindPort");
+            if [[ $(echo "$PIA_BIND_PORT_RESPONSE" | jq -r '.status') != "OK" ]]; then
+                echo -e "The API did not return OK when trying to bind port... Exiting."
+                exit 1
+            fi"
+    fi
+
 }
 
 # has to be ran as `sudo -E` in order to work properly
