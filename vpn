@@ -423,7 +423,8 @@ EOF
             if [[ $(echo "$PIA_BIND_PORT_RESPONSE" | jq -r '.status') != 'OK' ]]; then
                 echo -e 'The API did not return OK when trying to bind port... Exiting.'
                 exit 1
-            fi"
+            fi
+        done" &
     fi
 
 }
