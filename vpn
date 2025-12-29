@@ -124,7 +124,7 @@ get_pia_wg_server_info_json() {
     local PIA_WG_SERVER_JSON
     if [[ "${PIA_PF}" == "true" ]]; then
         local ERRSTR=" or no servers with port forward enabled in region"
-        PIA_WG_SERVER_JSON="$(echo "$PIA_SERVERS_JSON" | jq -r "$PIA_SERVERS_JSON_WG_SELECTOR""select((.id == \"$PIA_REGION_ID\")) and (.port_forward == true)")"
+        PIA_WG_SERVER_JSON="$(echo "$PIA_SERVERS_JSON" | jq -r "$PIA_SERVERS_JSON_WG_SELECTOR""select((.id == \"$PIA_REGION_ID\") and (.port_forward == true))")"
     else
         PIA_WG_SERVER_JSON="$(echo "$PIA_SERVERS_JSON" | jq -r "$PIA_SERVERS_JSON_WG_SELECTOR""select(.id == \"$PIA_REGION_ID\")")"
     fi
