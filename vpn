@@ -269,6 +269,7 @@ up() {
     local NS_NAME="$1"
     local WG_NAME="$NS_NAME"
     local PIA_REGION_ID="$2"
+    local PIA_CERT_FILE="$VPN_ROOT_DIR/secret/pia_ca.rsa.4096.crt"
 
     validate_name "$NS_NAME"
     validate_name "$WG_NAME"
