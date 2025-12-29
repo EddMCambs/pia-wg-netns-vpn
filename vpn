@@ -392,7 +392,7 @@ nameserver $PIA_DNS_SERVER_2
         PIA_SIGNATURE=$(echo "$PIA_PAYLOAD_AND_SIGNATURE" | jq -r '.signature')
         PIA_PAYLOAD=$(echo "$PIA_PAYLOAD_AND_SIGNATURE" | jq -r '.payload')
         PIA_PORT=$(echo "$PIA_PAYLOAD" | base64 -d | jq -r '.port')
-        cat << EOF > "${PIA_PS_CACHE}
+        cat << EOF > "${PIA_PS_CACHE}"
 PIA_SIGNATURE=$PIA_SIGNATURE
 PIA_PAYLOAD=$PIA_PAYLOAD
 PIA_PORT=$PIA_PORT
