@@ -390,6 +390,8 @@ nameserver $PIA_DNS_SERVER_2
         echo -e "The API did not return OK when trying to bind port... Exiting."
         exit 1
     else
+        # echo the port so we can so stuff with it
+        echo "Port bound successfully. The port is ${PIA_PORT}"
         # Start a background task that runs every 900 seconds
         nohup bash -c "while true; do sleep 900; PIA_BIND_PORT_RESPONSE=\"$(ip netns exec "$NS_NAME" curl -Gs -m 5 \
             --connect-to "$PIA_WG_SERVER_HOSTNAME::$PIA_WG_SERVER_IP:" \
