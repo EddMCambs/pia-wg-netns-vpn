@@ -37,6 +37,7 @@ PIA_WG_SERVER_HOSTNAME=""
 readonly PIA_SERVERS_JSON_WG_SELECTOR=".regions[] | select(.offline == false) | select(.servers.wg) | "
 readonly PIA_SERVERS_LIST_CACHE="$VPN_ROOT_DIR/public/pia_servers_v6.json"
 
+
 get_pia_servers_json() {
     # Try using the cached list
     if [[ -f "$PIA_SERVERS_LIST_CACHE" ]] && \
@@ -367,19 +368,37 @@ nameserver $PIA_DNS_SERVER_2
       return 0
     fi
 
-    # Otherwise we need to start the port forward up. First, we need a payload+sig
-    PIA_PAYLOAD_AND_SIGNATURE="$(ip netns exec "$NS_NAME" curl -s -m 5 \
-      --connect-to "$PIA_WG_SERVER_HOSTNAME::$PIA_WG_SERVER_IP:" \
-      --cacert "$PIA_CERT_FILE" \
-      -G --data-urlencode "token=${PIA_TOKEN}" \
-      "https://${PIA_WG_SERVER_HOSTNAME}:19999/getSignature")"
-    if [[ $(echo "$PIA_PAYLOAD_AND_SIGNATURE" | jq -r '.status') != "OK" ]]; then
-        echo -e "The payload_and_signature variable does not contain an OK status."    
-        exit 1
+    # Otherwise we need to start the port forward up. First, we need a payload+sig. Check if we've got one cached for this vpn name
+    readonly PIA_PS_CACHE="$VPN_ROOT_DIR/secret/${NS_NAME}_PS"
+    local NEW_PORT=true
+    if [[ -f "$VPIA_PS_CACHE" ]]; then
+        source $PIA_PS_CACHE
+        if [[ ${PIA_PF_EXPIRY:0} < $(date +%s) ]]; then
+            echo "Existing payload expired, getting new one"
+            rm "$PIA_PS_CACHE"
+        else
+            NEW_PORT=false
     fi
-    PIA_SIGNATURE=$(echo "$PIA_PAYLOAD_AND_SIGNATURE" | jq -r '.signature')
-    PIA_PAYLOAD=$(echo "$PIA_PAYLOAD_AND_SIGNATURE" | jq -r '.payload')
-    PIA_PORT=$(echo "$PIA_PAYLOAD" | base64 -d | jq -r '.port')
+    if [[ "${NEW_PORT}" == "true" ]]; then
+        PIA_PAYLOAD_AND_SIGNATURE="$(ip netns exec "$NS_NAME" curl -s -m 5 \
+            --connect-to "$PIA_WG_SERVER_HOSTNAME::$PIA_WG_SERVER_IP:" \
+            --cacert "$PIA_CERT_FILE" \
+            -G --data-urlencode "token=${PIA_TOKEN}" \
+            "https://${PIA_WG_SERVER_HOSTNAME}:19999/getSignature")"
+        if [[ $(echo "$PIA_PAYLOAD_AND_SIGNATURE" | jq -r '.status') != "OK" ]]; then
+            echo -e "The payload_and_signature variable does not contain an OK status."    
+            exit 1
+        fi
+        PIA_SIGNATURE=$(echo "$PIA_PAYLOAD_AND_SIGNATURE" | jq -r '.signature')
+        PIA_PAYLOAD=$(echo "$PIA_PAYLOAD_AND_SIGNATURE" | jq -r '.payload')
+        PIA_PORT=$(echo "$PIA_PAYLOAD" | base64 -d | jq -r '.port')
+        cat << EOF > "${PIA_PS_CACHE}
+PIA_SIGNATURE=$PIA_SIGNATURE
+PIA_PAYLOAD=$PIA_PAYLOAD
+PIA_PORT=$PIA_PORT
+PIA_PF_EXPIRY=$(date -d $(echo "$payload" | base64 -d | jq -r '.expires_at') +%s)
+EOF
+    fi
     # Now we need to bind the port:
     PIA_BIND_PORT_RESPONSE="$(ip netns exec "$NS_NAME" curl -Gs -m 5 \
     --connect-to "$PIA_WG_SERVER_HOSTNAME::$PIA_WG_SERVER_IP:" \
@@ -399,9 +418,9 @@ nameserver $PIA_DNS_SERVER_2
             --cacert "$PIA_CERT_FILE" \
             --data-urlencode "payload=${PIA_PAYLOAD}" \
             --data-urlencode "signature=${PIA_SIGNATURE}" \
-            "https://${PIA_WG_SERVER_HOSTNAME}:19999/bindPort");
-            if [[ $(echo "$PIA_BIND_PORT_RESPONSE" | jq -r '.status') != "OK" ]]; then
-                echo -e "The API did not return OK when trying to bind port... Exiting."
+            "https://${PIA_WG_SERVER_HOSTNAME}:19999/bindPort")\";
+            if [[ $(echo "$PIA_BIND_PORT_RESPONSE" | jq -r '.status') != 'OK' ]]; then
+                echo -e 'The API did not return OK when trying to bind port... Exiting.'
                 exit 1
             fi"
     fi
