@@ -373,7 +373,7 @@ nameserver $PIA_DNS_SERVER_2
     local NEW_PORT=true
     if [[ -f "$PIA_PS_CACHE" ]]; then
         source $PIA_PS_CACHE
-        if [[ ${PIA_PF_EXPIRY:0} < $(date +%s) ]]; then
+        if [[ ${PIA_PF_EXPIRY:-0} < $(date +%s) ]]; then
             echo "Existing payload expired, getting new one"
             rm "$PIA_PS_CACHE"
         else
@@ -416,7 +416,7 @@ EOF
 
     # Start a process task that runs every 900 seconds to bind the port
     # If we're a systemd unit, run it foreground, else nohup it
-    if [[ ${SYSTEMD_STARTED:"no"} == "yes" ]]; then
+    if [[ ${SYSTEMD_STARTED:-"no"} == "yes" ]]; then
         while true; do
             PIA_BIND_PORT_RESPONSE="$(ip netns exec "$NS_NAME" curl -Gs -m 5 \
                 --connect-to "$PIA_WG_SERVER_HOSTNAME::$PIA_WG_SERVER_IP:" \
