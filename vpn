@@ -418,6 +418,7 @@ EOF
     # If we're a systemd unit, run it foreground, else nohup it
     if [[ ${SYSTEMD_STARTED:-"no"} == "yes" ]]; then
         while true; do
+            sleep 900
             PIA_BIND_PORT_RESPONSE="$(ip netns exec "$NS_NAME" curl -Gs -m 5 \
                 --connect-to "$PIA_WG_SERVER_HOSTNAME::$PIA_WG_SERVER_IP:" \
                 --cacert "$PIA_CERT_FILE" \
