@@ -266,7 +266,7 @@ up() {
         local PIA_PF=true
     else
         local PIA_PF=false
-    fi  
+    fi
     local NS_NAME="$1"
     local WG_NAME="$NS_NAME"
     local PIA_REGION_ID="$2"
@@ -387,7 +387,7 @@ nameserver $PIA_DNS_SERVER_2
             -G --data-urlencode "token=${PIA_TOKEN}" \
             "https://${PIA_WG_SERVER_HOSTNAME}:19999/getSignature")"
         if [[ $(echo "$PIA_PAYLOAD_AND_SIGNATURE" | jq -r '.status') != "OK" ]]; then
-            echo -e "The payload_and_signature variable does not contain an OK status."    
+            echo -e "The payload_and_signature variable does not contain an OK status."
             exit 1
         fi
         PIA_SIGNATURE=$(echo "$PIA_PAYLOAD_AND_SIGNATURE" | jq -r '.signature')
@@ -410,22 +410,39 @@ EOF
     if [[ $(echo "$PIA_BIND_PORT_RESPONSE" | jq -r '.status') != "OK" ]]; then
         echo -e "The API did not return OK when trying to bind port... Exiting."
         exit 1
-    else
-        # echo the port so we can so stuff with it
-        echo "Port bound successfully. The port is ${PIA_PORT}"
-        # Start a background task that runs every 900 seconds
-        nohup ip netns exec "$NS_NAME" bash -c "while true; do sleep 900; if [[ $(curl -Gs -m 5 \
-            --connect-to "$PIA_WG_SERVER_HOSTNAME::$PIA_WG_SERVER_IP:" \
-            --cacert "$PIA_CERT_FILE" \
-            --data-urlencode "payload=${PIA_PAYLOAD}" \
-            --data-urlencode "signature=${PIA_SIGNATURE}" \
-            "https://${PIA_WG_SERVER_HOSTNAME}:19999/bindPort" | jq -r '.status') != 'OK' ]]; then
-                echo -e 'The API did not return OK when trying to bind port... Exiting.'
+    fi
+    # echo the port so we can so stuff with it
+    echo "Port bound successfully. The port is ${PIA_PORT}"
+
+    # Start a process task that runs every 900 seconds to bind the port
+    # If we're a systemd unit, run it foreground, else nohup it
+    if [[ ${SYSTEMD_STARTED:"no"} == "yes" ]]; then
+        while true; do
+            PIA_BIND_PORT_RESPONSE="$(ip netns exec "$NS_NAME" curl -Gs -m 5 \
+                --connect-to "$PIA_WG_SERVER_HOSTNAME::$PIA_WG_SERVER_IP:" \
+                --cacert "$PIA_CERT_FILE" \
+                --data-urlencode "payload=${PIA_PAYLOAD}" \
+                --data-urlencode "signature=${PIA_SIGNATURE}" \
+                "https://${PIA_WG_SERVER_HOSTNAME}:19999/bindPort")"
+            if [[ $(echo "$PIA_BIND_PORT_RESPONSE" | jq -r '.status') != "OK" ]]; then
+                echo "The API did not return OK when trying to bind port... Exiting."
+                echo "Full response was:"
+                echo "$(echo "$PIA_BIND_PORT_RESPONSE" | jq)"
                 exit 1
             fi
-        done" &
+        done
     fi
-
+    mkdir -p /var/log/vpn
+    nohup ip netns exec "$NS_NAME" bash -c "while true; do sleep 900; if [[ $(curl -Gs -m 5 \
+        --connect-to "$PIA_WG_SERVER_HOSTNAME::$PIA_WG_SERVER_IP:" \
+        --cacert "$PIA_CERT_FILE" \
+        --data-urlencode "payload=${PIA_PAYLOAD}" \
+        --data-urlencode "signature=${PIA_SIGNATURE}" \
+        "https://${PIA_WG_SERVER_HOSTNAME}:19999/bindPort" | jq -r '.status') != 'OK' ]]; then
+        echo -e 'The API did not return OK when trying to bind port... Exiting.'
+        exit 1
+        fi
+    done" > /var/log/vpn/${NS_NAME}.log &
 }
 
 # has to be ran as `sudo -E` in order to work properly
