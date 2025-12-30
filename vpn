@@ -75,7 +75,7 @@ print_pia_regions() {
     printf '=%.0s' $(eval "echo {1..5}")
     printf '\n'
     echo "$PIA_SERVERS_JSON" | jq -r "$PIA_SERVERS_JSON_WG_SELECTOR"'[.id, .name, .port_forward] | @tsv' | \
-                               while read -r ID NAME PF; do printf "%-${MAX_NAME_LEN}s | %-${MAX_ID_LEN}s| %s\n" "$NAME" "$ID" "$PF" ; done | sort -h -k1
+                               while IFS=$'\t' read -r ID NAME PF; do printf "%-${MAX_NAME_LEN}s | %-${MAX_ID_LEN}s | %s\n" "$NAME" "$ID" "$PF" ; done | sort -h -k1
 }
 
 bash_completion_regions() {
