@@ -64,15 +64,18 @@ print_pia_regions() {
     local MAX_NAME_LEN MAX_ID_LEN
     MAX_NAME_LEN="$(echo "$PIA_SERVERS_JSON" | jq -r "$PIA_SERVERS_JSON_WG_SELECTOR"'[.name | length] | @tsv' | sort -n | tail -n1)"
     MAX_ID_LEN="$(echo "$PIA_SERVERS_JSON" | jq -r "$PIA_SERVERS_JSON_WG_SELECTOR"'[.id | length] | @tsv' | sort -n | tail -n1)"
-    printf "%-${MAX_NAME_LEN}s | %s\n" "Region" "Id"
+    printf "%-${MAX_NAME_LEN}s | %-${MAX_ID_LEN}s | %s\n" "Region" "Id" "PF"
     # shellcheck disable=SC2046
     printf '=%.0s' $(eval "echo {1..$MAX_NAME_LEN}")
     printf '=|='
     # shellcheck disable=SC2046
     printf '=%.0s' $(eval "echo {1..$MAX_ID_LEN}")
+    printf '=|='
+    # shellcheck disable=SC2046
+    printf '=%.0s' $(eval "echo {1..5}")
     printf '\n'
-    echo "$PIA_SERVERS_JSON" | jq -r "$PIA_SERVERS_JSON_WG_SELECTOR"'[.id, .name] | @tsv' | \
-                               while read -r ID NAME ; do printf "%-${MAX_NAME_LEN}s | %s\n" "$NAME" "$ID" ; done | sort -h -k1
+    echo "$PIA_SERVERS_JSON" | jq -r "$PIA_SERVERS_JSON_WG_SELECTOR"'[.id, .name .port_forward] | @tsv' | \
+                               while read -r ID NAME PF; do printf "%-${MAX_NAME_LEN}s | %-${MAX_ID_LEN}s| %s\n" "$NAME" "$ID" "$PF" ; done | sort -h -k1
 }
 
 bash_completion_regions() {
