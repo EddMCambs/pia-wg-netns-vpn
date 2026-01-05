@@ -22,6 +22,7 @@ set -euo pipefail
 # User settings
 
 readonly VPN_ROOT_DIR="/var/lib/vpn"
+readonly VPN_PS_CACHE_DIR="${VPN_ROOT_DIR}/secret/PayloadsAndSignatures"
 readonly PIA_SERVERS_LIST_CACHE_SECONDS=$((60*60*24))  # 24 hours
 readonly PIA_TOKEN_CACHE_SECONDS=$((60*60*24))         # 24 hours
 
@@ -33,6 +34,9 @@ PIA_SERVERS_JSON=""
 PIA_TOKEN=""
 PIA_WG_SERVER_INFO_JSON=""
 PIA_WG_SERVER_HOSTNAME=""
+PIA_SIGNATURE=""
+PIA_PAYLOAD=""
+PIA_PORT=""
 
 readonly PIA_SERVERS_JSON_WG_SELECTOR=".regions[] | select(.offline == false) | select(.servers.wg) | "
 readonly PIA_SERVERS_LIST_CACHE="$VPN_ROOT_DIR/public/pia_servers_v6.json"
@@ -193,6 +197,12 @@ ns_exists_and_is_ours() {
     then
         echo "Error: No such VPN name \"$NS_NAME\"."
         exit 1
+    elif ! ip netns list | grep -q "^${NS_NAME}\s"; then
+        echo "Error: NS \"$NS_NAME\" should exist, but is missing."
+        exit 1
+    elif ! ip netns exec ${NS_NAME} wg show ${NS_NAME} &> /dev/null; then
+        echo "Error: NS \"$NS_NAME\" is up, but wireguard interface is down."
+        exit 1
     fi
 }
 
@@ -248,6 +258,149 @@ down() {
     rm -r "/etc/netns/$NS_NAME" || true
     rm "$VPN_ROOT_DIR/public/names/$NS_NAME" || true
     echo "Done!"
+}
+
+get_payload_and_signature() {
+    NS_NAME=$1
+    readonly VPN_PS_CACHE="$VPN_PS_CACHE_DIR/${NS_NAME}"
+    local NEW_PS_NEEDED=true
+
+    validate_name "${NS_NAME}"
+    ns_exists_and_is_ours "${NS_NAME}"
+    get_pia_token
+    if [[ -z $PIA_WG_SERVER_HOSTNAME ]]; then
+        get_pia_servers_json
+        PIA_WG_SERVER_HOSTNAME=$(echo "${PIA_SERVERS_JSON}" | jq )
+
+
+    # If there's an existing payload and signature cached, check if it's still valid. If there's
+    # no cache, or its expired, connect to the vpn endpoint and get a new one.
+    if [[ -f "$VPN_PS_CACHE" ]]; then
+       . "$VPN_PS_CACHE"
+        if [[ ${PIA_PF_EXPIRY:-0} < $(date +%s) ]]; then
+            echo "Existing payload expired, getting new one"
+            rm "$VPN_PS_CACHE"
+        else
+            NEW_PS_NEEDED=false
+        fi
+    fi
+    if [[ "${NEW_PS_NEEDED}" == "true" ]]; then
+        PIA_PAYLOAD_AND_SIGNATURE="$(ip netns exec "$NS_NAME" curl -s -m 5 \
+            --connect-to "$PIA_WG_SERVER_HOSTNAME::$PIA_WG_SERVER_IP:" \
+            --cacert "$PIA_CERT_FILE" \
+            -G --data-urlencode "token=${PIA_TOKEN}" \
+            "https://${PIA_WG_SERVER_HOSTNAME}:19999/getSignature")"
+        if [[ $(echo "$PIA_PAYLOAD_AND_SIGNATURE" | jq -r '.status') != "OK" ]]; then
+            echo -e "The payload_and_signature variable does not contain an OK status."
+            exit 1
+        fi
+        mkdir -p "${VPN_PS_CACHE_DIR}"
+        PIA_SIGNATURE=$(echo "$PIA_PAYLOAD_AND_SIGNATURE" | jq -r '.signature')
+        PIA_PAYLOAD=$(echo "$PIA_PAYLOAD_AND_SIGNATURE" | jq -r '.payload')
+        PIA_PORT=$(echo "$PIA_PAYLOAD" | base64 -d | jq -r '.port')
+
+        # Now we write the cache file.
+        #
+        # Bit of a hack so I can keep indentation in the script, the sed command strips the leading
+        # whitespace so the output file is unindented. (Using cat either stores the indendation
+        # verbatim, or *requires* using tabs, not spaces, which most IDEs will blindly convert and
+        # break). Using herestring rather than heredoc so we don't need to have an unindented
+        # EOF at the end
+        sed 's/^[[:space:]]\+//' <<< " \
+            PIA_SIGNATURE=$PIA_SIGNATURE
+            PIA_PAYLOAD=$PIA_PAYLOAD
+            PIA_PORT=$PIA_PORT
+            PIA_PF_EXPIRY=$(date -d $(echo "${PIA_PAYLOAD}" | base64 -d | jq -r '.expires_at') +%s)" > ${VPN_PS_CACHE}
+    fi
+}
+
+port_forward_bind() {
+    local NETNS_NAME=$1
+    local BIND_MODE=""
+    # We have three modes of binding the port:
+    #   background: which attempts to launch the binding script and put it into the background, with
+    #               NOHUP'd so it runs until it dies, is killed or the computer is restarted
+    #   foreground: Which leaves the command running and logging in the foreground (suitable for
+    #               putting in a systemd script or similar
+    #   oneshot:    Which runs the bind once, and then exits. This mode is suitable for running in a
+    #               cron or systemd timer of your own.
+    case "${2:-}" in
+        background)
+            BIND_MODE="BG" ;;
+        foreground)
+            BIND_MODE="FG" ;;
+        oneshot)
+            BIND_MODE="OS" ;;
+        "")
+            echo "No mode specified, defaulting to background"
+            BIND_MODE="BG" ;;
+        *)
+            echo "Error: Unknown mode \"${2:-}\"."
+            echo
+            usage
+            exit 1 ;;
+    esac
+    # Check we've got a valid ns
+    validate_name "$NS_NAME"
+    ns_exists_and_is_ours "$NS_NAME"
+    # Get a valid payload and signature loaded
+    get_payload_and_signature "$NS_NAME"
+    # Create the curl command we're going to use (we use it three times, so easiest to create it now)
+    curl_cmd="curl -Gs -m 5 \
+    --connect-to "$PIA_WG_SERVER_HOSTNAME::$PIA_WG_SERVER_IP:" \
+    --cacert "$PIA_CERT_FILE" \
+    --data-urlencode "payload=${PIA_PAYLOAD}" \
+    --data-urlencode "signature=${PIA_SIGNATURE}" \
+    \"https://${PIA_WG_SERVER_HOSTNAME}:19999/bindPort\")"
+    # Now we need to bind the port. We always do the first one stand alone in the foreground so
+    # we can error where the user will see it.
+
+    PIA_BIND_PORT_RESPONSE="$(ip netns exec "$NS_NAME" curl -Gs -m 5 \
+    --connect-to "$PIA_WG_SERVER_HOSTNAME::$PIA_WG_SERVER_IP:" \
+    --cacert "$PIA_CERT_FILE" \
+    --data-urlencode "payload=${PIA_PAYLOAD}" \
+    --data-urlencode "signature=${PIA_SIGNATURE}" \
+    "https://${PIA_WG_SERVER_HOSTNAME}:19999/bindPort")"
+    if [[ $(echo "$PIA_BIND_PORT_RESPONSE" | jq -r '.status') != "OK" ]]; then
+        echo -e "The API did not return OK when trying to bind port... Exiting."
+        exit 1
+    fi
+    # echo the port so we can so stuff with it
+    echo "Port bound successfully. The port is ${PIA_PORT}"
+
+    # If we're in one-shot mode, we're done now
+
+    # Start a process task that runs every 900 seconds to bind the port
+    # If we're a systemd unit, run it foreground, else nohup it
+    if [[ ${SYSTEMD_STARTED:-"no"} == "yes" ]]; then
+        while true; do
+            sleep 900
+            PIA_BIND_PORT_RESPONSE="$(ip netns exec "$NS_NAME" curl -Gs -m 5 \
+                --connect-to "$PIA_WG_SERVER_HOSTNAME::$PIA_WG_SERVER_IP:" \
+                --cacert "$PIA_CERT_FILE" \
+                --data-urlencode "payload=${PIA_PAYLOAD}" \
+                --data-urlencode "signature=${PIA_SIGNATURE}" \
+                "https://${PIA_WG_SERVER_HOSTNAME}:19999/bindPort")"
+            if [[ $(echo "$PIA_BIND_PORT_RESPONSE" | jq -r '.status') != "OK" ]]; then
+                echo "The API did not return OK when trying to bind port... Exiting."
+                echo "Full response was:"
+                echo "$(echo "$PIA_BIND_PORT_RESPONSE" | jq)"
+                exit 1
+            fi
+        done
+    fi
+    mkdir -p /var/log/vpn
+    nohup ip netns exec "$NS_NAME" bash -c "while true; do sleep 900; if [[ $(curl -Gs -m 5 \
+        --connect-to "$PIA_WG_SERVER_HOSTNAME::$PIA_WG_SERVER_IP:" \
+        --cacert "$PIA_CERT_FILE" \
+        --data-urlencode "payload=${PIA_PAYLOAD}" \
+        --data-urlencode "signature=${PIA_SIGNATURE}" \
+        "https://${PIA_WG_SERVER_HOSTNAME}:19999/bindPort" | jq -r '.status') != 'OK' ]]; then
+        echo -e 'The API did not return OK when trying to bind port... Exiting.'
+        exit 1
+        fi
+    done" > /var/log/vpn/${NS_NAME}.log &
+
 }
 
 up() {
@@ -372,81 +525,8 @@ nameserver $PIA_DNS_SERVER_2
     fi
 
     # Otherwise we need to start the port forward up. First, we need a payload+sig. Check if we've got one cached for this vpn name
-    readonly PIA_PS_CACHE="$VPN_ROOT_DIR/secret/${NS_NAME}_PS"
-    local NEW_PORT=true
-    if [[ -f "$PIA_PS_CACHE" ]]; then
-        source $PIA_PS_CACHE
-        if [[ ${PIA_PF_EXPIRY:-0} < $(date +%s) ]]; then
-            echo "Existing payload expired, getting new one"
-            rm "$PIA_PS_CACHE"
-        else
-            NEW_PORT=false
-        fi
-    fi
-    if [[ "${NEW_PORT}" == "true" ]]; then
-        PIA_PAYLOAD_AND_SIGNATURE="$(ip netns exec "$NS_NAME" curl -s -m 5 \
-            --connect-to "$PIA_WG_SERVER_HOSTNAME::$PIA_WG_SERVER_IP:" \
-            --cacert "$PIA_CERT_FILE" \
-            -G --data-urlencode "token=${PIA_TOKEN}" \
-            "https://${PIA_WG_SERVER_HOSTNAME}:19999/getSignature")"
-        if [[ $(echo "$PIA_PAYLOAD_AND_SIGNATURE" | jq -r '.status') != "OK" ]]; then
-            echo -e "The payload_and_signature variable does not contain an OK status."
-            exit 1
-        fi
-        PIA_SIGNATURE=$(echo "$PIA_PAYLOAD_AND_SIGNATURE" | jq -r '.signature')
-        PIA_PAYLOAD=$(echo "$PIA_PAYLOAD_AND_SIGNATURE" | jq -r '.payload')
-        PIA_PORT=$(echo "$PIA_PAYLOAD" | base64 -d | jq -r '.port')
-        cat << EOF > "${PIA_PS_CACHE}"
-PIA_SIGNATURE=$PIA_SIGNATURE
-PIA_PAYLOAD=$PIA_PAYLOAD
-PIA_PORT=$PIA_PORT
-PIA_PF_EXPIRY=$(date -d $(echo "${PIA_PAYLOAD}" | base64 -d | jq -r '.expires_at') +%s)
-EOF
-    fi
-    # Now we need to bind the port:
-    PIA_BIND_PORT_RESPONSE="$(ip netns exec "$NS_NAME" curl -Gs -m 5 \
-    --connect-to "$PIA_WG_SERVER_HOSTNAME::$PIA_WG_SERVER_IP:" \
-    --cacert "$PIA_CERT_FILE" \
-    --data-urlencode "payload=${PIA_PAYLOAD}" \
-    --data-urlencode "signature=${PIA_SIGNATURE}" \
-    "https://${PIA_WG_SERVER_HOSTNAME}:19999/bindPort")"
-    if [[ $(echo "$PIA_BIND_PORT_RESPONSE" | jq -r '.status') != "OK" ]]; then
-        echo -e "The API did not return OK when trying to bind port... Exiting."
-        exit 1
-    fi
-    # echo the port so we can so stuff with it
-    echo "Port bound successfully. The port is ${PIA_PORT}"
+    get_payload_and_signature "${NS_NAME}"
 
-    # Start a process task that runs every 900 seconds to bind the port
-    # If we're a systemd unit, run it foreground, else nohup it
-    if [[ ${SYSTEMD_STARTED:-"no"} == "yes" ]]; then
-        while true; do
-            sleep 900
-            PIA_BIND_PORT_RESPONSE="$(ip netns exec "$NS_NAME" curl -Gs -m 5 \
-                --connect-to "$PIA_WG_SERVER_HOSTNAME::$PIA_WG_SERVER_IP:" \
-                --cacert "$PIA_CERT_FILE" \
-                --data-urlencode "payload=${PIA_PAYLOAD}" \
-                --data-urlencode "signature=${PIA_SIGNATURE}" \
-                "https://${PIA_WG_SERVER_HOSTNAME}:19999/bindPort")"
-            if [[ $(echo "$PIA_BIND_PORT_RESPONSE" | jq -r '.status') != "OK" ]]; then
-                echo "The API did not return OK when trying to bind port... Exiting."
-                echo "Full response was:"
-                echo "$(echo "$PIA_BIND_PORT_RESPONSE" | jq)"
-                exit 1
-            fi
-        done
-    fi
-    mkdir -p /var/log/vpn
-    nohup ip netns exec "$NS_NAME" bash -c "while true; do sleep 900; if [[ $(curl -Gs -m 5 \
-        --connect-to "$PIA_WG_SERVER_HOSTNAME::$PIA_WG_SERVER_IP:" \
-        --cacert "$PIA_CERT_FILE" \
-        --data-urlencode "payload=${PIA_PAYLOAD}" \
-        --data-urlencode "signature=${PIA_SIGNATURE}" \
-        "https://${PIA_WG_SERVER_HOSTNAME}:19999/bindPort" | jq -r '.status') != 'OK' ]]; then
-        echo -e 'The API did not return OK when trying to bind port... Exiting.'
-        exit 1
-        fi
-    done" > /var/log/vpn/${NS_NAME}.log &
 }
 
 # has to be ran as `sudo -E` in order to work properly
@@ -589,7 +669,7 @@ usage() {
     local PROGRAM
     PROGRAM=$(basename -- "$0")
     echo "Usage: [sudo   ] $PROGRAM regions                        list available VPN regions"
-    echo "       [sudo   ] $PROGRAM up <name> <region-id>          create VPN <name> connected to <region-id> region"
+    echo "       [sudo   ] $PROGRAM up <name> <region-id> [pf]     create VPN <name> connected to <region-id> region, add 'pf' if you want to request a forwarded port"
     echo "       [sudo   ] $PROGRAM down <name>                    delete VPN <name>"
     echo "       [sudo   ] $PROGRAM list                           list created VPNs"
     echo "       [sudo   ] $PROGRAM stat <name>                    show information for VPN <name>"
@@ -662,11 +742,14 @@ shift
 
 # Make sure these exist and they are secured
 mkdir -p "$VPN_ROOT_DIR"
-chmod 605 "$VPN_ROOT_DIR"
+chmod 0755 "$VPN_ROOT_DIR"
 mkdir -p "$VPN_ROOT_DIR/public/names"
-chmod 605 -R "$VPN_ROOT_DIR/public"
+# Would usually use the octal here, but can't represent X in octal, when recursing so use the ugo= syntax instead
+chmod u=rwX,go=rX -R "$VPN_ROOT_DIR/public"
 mkdir -p "$VPN_ROOT_DIR/secret"
-chmod 600 "$VPN_ROOT_DIR/secret"
+mkdir -p "$VPN_PS_CACHE_DIR"
+chmod  u=rwX,go= "$VPN_ROOT_DIR/secret"
+
 chown root:root -R "$VPN_ROOT_DIR"
 
 # Cleanup our list of names in case it's out of sync: the system got rebooted,
